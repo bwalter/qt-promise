@@ -1,0 +1,9 @@
+# Qt
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.qbs.user.*
+
+# QtCreator
+*.autosave
+
