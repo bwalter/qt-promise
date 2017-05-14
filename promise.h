@@ -25,12 +25,11 @@
 ****************************************************************************/
 
 // TODO:
+// static Promise::resolved(T)
 // PromiseContext(QThreadPool *)
 // Promise.delay(2000)
 // Promise.then(promise)
-// PromiseGroup(FailStrategy, QThreadPool *).add(promise).add(promise2).add(promise3)
-
-#define QT_SHAREDPOINTER_TRACK_POINTERS
+// ConcurrentPromises(FailStrategy, QThreadPool *) << promise1 << promise2 << promise3
 
 #include <QFuture>
 #include <QMetaMethod>
