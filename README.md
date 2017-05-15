@@ -457,11 +457,13 @@ downloadPromise
 Installation
 ========
 
-TODO
+QtPromise consists of a single header file (promise.h). Just include it in your project and enjoy :)
 
 
 API
 ========
+
+QtPromise is implemented inside a `QtPromise` namespace.
 
 Promise
 ---------------
