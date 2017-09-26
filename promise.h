@@ -328,7 +328,7 @@ class DeferObject {
         return;
       }
 
-      for (auto callback : qAsConst(m_callbacks)) {
+      for (const auto &callback : m_callbacks) {
         const ConnectionReceiverWrapperPtr &receiverWrapperPtr = callback.first;
         const std::function<void()> &func = callback.second;
         Q_ASSERT(!receiverWrapperPtr.isNull());
