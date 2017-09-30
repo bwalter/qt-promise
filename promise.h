@@ -716,6 +716,22 @@ class Promise {
                   >(std::move(functor));
     }
 
+    Promise<T> delay(int ms) const {
+      auto next = *this;
+      return then([=](){
+        auto deferPtr = QSharedPointer<Deferred<T>>(new Deferred<T>());
+        auto t = new QTimer(m_contextObject);
+
+        QObject::connect(t, &QTimer::timeout, [=](){
+          deferPtr->resolve(next);
+        });
+
+        QObject::connect(t, &QTimer::timeout, t, &QObject::deleteLater);
+        t->start(ms);
+        return deferPtr->promise();
+      });
+    }
+
     // TODO: With a promise
 #if 0
     template <typename PromiseType>
