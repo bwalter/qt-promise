@@ -716,6 +716,18 @@ class Promise {
                   >(std::move(functor));
     }
 
+    template <typename Functor>
+    Promise<T>
+    tap(Functor &&functor) const {
+      Promise<T> p = *this;
+      return _then<typename Private::function_traits<Functor>::result_type,
+                   typename Private::function_traits<Functor>::result_type
+                  >(std::move(functor))
+      .then([=]() {
+        return p;
+      });
+    }
+
     Promise<T> delay(int ms) const {
       auto next = *this;
       return then([=](){
