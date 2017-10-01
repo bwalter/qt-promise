@@ -730,9 +730,9 @@ class Promise {
 
     Promise<T> delay(int ms) const {
       auto next = *this;
-      return then([=](){
+      return then([next, ms](){
         auto deferPtr = QSharedPointer<Deferred<T>>(new Deferred<T>());
-        auto t = new QTimer(m_contextObject);
+        auto t = new QTimer(next.contextObject());
 
         QObject::connect(t, &QTimer::timeout, [=](){
           deferPtr->resolve(next);
