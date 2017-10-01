@@ -790,6 +790,22 @@ class Promise {
       return _finally<T, void>(std::move(func));
     }
 
+    // Execute the given function after the previous promise was resolved OR promised
+    // and return a new promie
+    template <typename Functor>
+    typename std::enable_if<
+                      Private::async_traits<
+                         typename Private::function_traits<Functor>::result_type>::is_promise,
+                      Promise<typename Private::async_traits<
+                         typename Private::function_traits<Functor>::result_type>::arg_type
+                      >
+             >::type
+    finally(Functor &&functor) const {
+      return _breakpoint<typename Private::async_traits<typename Private::function_traits<Functor>::result_type>::arg_type,
+                   typename Private::function_traits<Functor>::result_type
+                  >(std::move(functor));
+    }
+
   private:
     enum PromiseCallType { ThenCall = 0, FailCall, FinallyCall };
 
@@ -952,6 +968,64 @@ class Promise {
             break;
 
           case Private::DeferObjectStatus::Rejected:
+          case Private::DeferObjectStatus::ContextDestroyed:
+            try {
+              nextDeferObject->start();
+              Private::run(std::move(functor), Private::Value<QObject *>(contextObjectPtr.data()));
+              nextDeferObject->reject(deferObject->promiseError());
+            }
+            catch (const PromiseError &error) {
+              // An error thrown inside the functor is propagated for both "fail" and "finally"
+              nextDeferObject->reject(error);
+            }
+            break;
+
+          case Private::DeferObjectStatus::Canceled:
+            // Current promise canceled => cancel next one, too
+            nextDeferObject->cancel();
+            break;
+        }
+      });
+
+      return Promise<PromiseType>(m_sharedContext, nextDeferObject);
+    }
+
+
+    template <typename PromiseType, typename RetValType, typename Functor>
+    Promise<PromiseType> _breakpoint(Functor &&functor) const {
+      static_assert(Private::function_traits<Functor>::arity <= 1, "_then(): Callback should take not more than one parameter");
+
+      auto deferObject = m_deferObject;
+      auto nextDeferObject = Private::DeferObject<PromiseType>::create(nullptr);
+
+      Q_ASSERT(deferObject.data());
+
+      auto connectionReceiverWrapperPtr = m_sharedContext->connectionReceiverWrapper();
+      QPointer<QObject> contextObjectPtr(m_sharedContext->contextObject());
+
+      deferObject->addCallback(connectionReceiverWrapperPtr, [=]() {
+        Q_ASSERT(!deferObject.isNull());
+
+        switch (deferObject->status()) {
+          case Private::DeferObjectStatus::Idle:
+          case Private::DeferObjectStatus::Running:
+            Q_UNREACHABLE();
+
+          case Private::DeferObjectStatus::Resolved:
+          case Private::DeferObjectStatus::Rejected:
+            try {
+              nextDeferObject->start();
+              Private::Value<RetValType> value = Private::run(std::move(functor), deferObject->value());
+
+              // "then" reflects the return value of the functor
+              nextDeferObject->resolve(value);
+            }
+            catch (const PromiseError &error) {
+              // An error thrown inside the functor is propagated for both "then" and "finally"
+              nextDeferObject->reject(error);
+            }
+            break;
+
           case Private::DeferObjectStatus::ContextDestroyed:
             try {
               nextDeferObject->start();
