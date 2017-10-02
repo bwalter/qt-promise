@@ -258,9 +258,7 @@ class DeferObject {
       auto deleter = [](QFutureWatcher<T> *instance) {
         instance->deleteLater();
       };
-      auto newFutureWatcher = new QFutureWatcher<T>();
-      newFutureWatcher->setFuture(future);
-      QSharedPointer<QFutureWatcher<T>> watcher(newFutureWatcher, deleter);
+      QSharedPointer<QFutureWatcher<T>> watcher(new QFutureWatcher<T>(), deleter);
 
       auto strongThis = m_thisWeakPtr.toStrongRef();
       Q_ASSERT(!strongThis.isNull());
