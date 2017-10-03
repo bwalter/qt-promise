@@ -1,3 +1,4 @@
+#pragma once
 /****************************************************************************
 **
 ** Copyright (C) 2017 Benoit Walter
@@ -1283,9 +1284,15 @@ void Private::DeferObject<T>::resolve(const Promise<U> &promise) {
   });
 }
 
+template <typename T>
+QSharedPointer<Deferred<T>> makeDeferredPtr()
+{
+  return QSharedPointer<Deferred<T>>(new Deferred<T>());
+}
+
 template <typename PromiseType, typename PromiseFunc>
 Promise<PromiseType> makePromise(PromiseFunc promiseFunc) {
-  auto deferPtr = QSharedPointer<Deferred<PromiseType>>(new Deferred<PromiseType>());
+  auto deferPtr = makeDeferredPtr<PromiseType>();
   auto resolveFunc = [=](const PromiseType &value) {
     deferPtr->resolve(value);
   };
@@ -1307,7 +1314,7 @@ Promise<typename Private::signal_traits<Member>::result_type>
 makeConnectionPromise(Emitter emitter, Member pointerToMemberFunction) {
   typedef typename Private::signal_traits<Member>::result_type RetType;
 
-  auto deferPtr = QSharedPointer<Deferred<RetType>>(new Deferred<RetType>());
+  auto deferPtr = makeDeferredPtr<RetType>();
 
   auto conn = QObject::connect(emitter, pointerToMemberFunction, [=](const RetType &arg) {
     deferPtr->resolve(arg);
