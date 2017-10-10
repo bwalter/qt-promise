@@ -14,9 +14,9 @@
 ** to you under the Apache License, Version 2.0 (the
 ** "License"); you may not use this file except in compliance
 ** with the License.  You may obtain a copy of the License at
-** 
+**
 **   http://www.apache.org/licenses/LICENSE-2.0
-** 
+**
 ** Unless required by applicable law or agreed to in writing,
 ** software distributed under the License is distributed on an
 ** "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -557,7 +557,7 @@ class SharedContext {
       m_contextObject = o;
       _updateConnectionReceiver();
     }
- 
+
     void resetContextObject() {
       m_contextObject = nullptr;
       _updateConnectionReceiver();
@@ -805,6 +805,17 @@ class Promise {
                   >(std::move(functor));
     }
 
+    // Executes the functor after the previous promise was rejected.
+    // The functor can return a new Promise to recover the promise chain.
+    // Otherwise the functor can throw the original PromiseError to continue the failed chain.
+    template <typename Functor>
+    Promise<T>
+    failCatch(Functor &&functor) const {
+      return _failCatch<typename Private::async_traits<typename Private::function_traits<Functor>::result_type>::arg_type,
+                   typename Private::function_traits<Functor>::result_type
+                  >(std::move(functor));
+    }
+
   private:
     enum PromiseCallType { ThenCall = 0, FailCall, FinallyCall };
 
@@ -1029,6 +1040,68 @@ class Promise {
             try {
               nextDeferObject->start();
               Private::run(std::move(functor), Private::Value<QObject *>(contextObjectPtr.data()));
+              nextDeferObject->reject(deferObject->promiseError());
+            }
+            catch (const PromiseError &error) {
+              // An error thrown inside the functor is propagated for both "fail" and "finally"
+              nextDeferObject->reject(error);
+            }
+            break;
+
+          case Private::DeferObjectStatus::Canceled:
+            // Current promise canceled => cancel next one, too
+            nextDeferObject->cancel();
+            break;
+        }
+      });
+
+      return Promise<PromiseType>(m_sharedContext, nextDeferObject);
+    }
+
+    template <typename PromiseType, typename RetValType, typename Functor>
+    Promise<PromiseType> _failCatch(Functor &&functor) const {
+      static_assert(Private::function_traits<Functor>::arity <= 1, "_then(): Callback should take not more than one parameter");
+
+      auto deferObject = m_deferObject;
+      auto nextDeferObject = Private::DeferObject<PromiseType>::create(nullptr);
+
+      Q_ASSERT(deferObject.data());
+
+      auto connectionReceiverWrapperPtr = m_sharedContext->connectionReceiverWrapper();
+      QPointer<QObject> contextObjectPtr(m_sharedContext->contextObject());
+
+      deferObject->addCallback(connectionReceiverWrapperPtr, [=]() {
+        Q_ASSERT(!deferObject.isNull());
+
+        switch (deferObject->status()) {
+            case Private::DeferObjectStatus::Idle:
+            case Private::DeferObjectStatus::Running:
+              Q_UNREACHABLE();
+
+            case Private::DeferObjectStatus::Resolved:
+              // "fail" function is not executed when the promise has been resolved
+              // and the promise value is simply forwarded
+              nextDeferObject->resolve(deferObject->value());
+              break;
+
+          case Private::DeferObjectStatus::Rejected:
+            try {
+              nextDeferObject->start();
+              Private::Value<RetValType> value = Private::run(std::move(functor), Private::Value<PromiseError>(deferObject->promiseError()));
+
+              // "then" reflects the return value of the functor
+              nextDeferObject->resolve(value);
+            }
+            catch (const PromiseError &error) {
+              // An error thrown inside the functor is propagated for both "then" and "finally"
+              nextDeferObject->reject(error);
+            }
+            break;
+
+          case Private::DeferObjectStatus::ContextDestroyed:
+            try {
+              nextDeferObject->start();
+              Private::run(std::move(functor), Private::Value<PromiseError>(deferObject->promiseError()));
               nextDeferObject->reject(deferObject->promiseError());
             }
             catch (const PromiseError &error) {
