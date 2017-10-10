@@ -1,3 +1,4 @@
+#pragma once
 /****************************************************************************
 **
 ** Copyright (C) 2017 Benoit Walter
@@ -13,9 +14,9 @@
 ** to you under the Apache License, Version 2.0 (the
 ** "License"); you may not use this file except in compliance
 ** with the License.  You may obtain a copy of the License at
-** 
+**
 **   http://www.apache.org/licenses/LICENSE-2.0
-** 
+**
 ** Unless required by applicable law or agreed to in writing,
 ** software distributed under the License is distributed on an
 ** "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -258,9 +259,7 @@ class DeferObject {
       auto deleter = [](QFutureWatcher<T> *instance) {
         instance->deleteLater();
       };
-      auto newFutureWatcher = new QFutureWatcher<T>();
-      newFutureWatcher->setFuture(future);
-      QSharedPointer<QFutureWatcher<T>> watcher(newFutureWatcher, deleter);
+      QSharedPointer<QFutureWatcher<T>> watcher(new QFutureWatcher<T>(), deleter);
 
       auto strongThis = m_thisWeakPtr.toStrongRef();
       Q_ASSERT(!strongThis.isNull());
@@ -328,7 +327,7 @@ class DeferObject {
         return;
       }
 
-      for (auto callback : qAsConst(m_callbacks)) {
+      for (const auto &callback : m_callbacks) {
         const ConnectionReceiverWrapperPtr &receiverWrapperPtr = callback.first;
         const std::function<void()> &func = callback.second;
         Q_ASSERT(!receiverWrapperPtr.isNull());
@@ -558,7 +557,7 @@ class SharedContext {
       m_contextObject = o;
       _updateConnectionReceiver();
     }
- 
+
     void resetContextObject() {
       m_contextObject = nullptr;
       _updateConnectionReceiver();
@@ -716,6 +715,34 @@ class Promise {
                   >(std::move(functor));
     }
 
+    template <typename Functor>
+    Promise<T>
+    tap(Functor &&functor) const {
+      Promise<T> p = *this;
+      return _then<typename Private::function_traits<Functor>::result_type,
+                   typename Private::function_traits<Functor>::result_type
+                  >(std::move(functor))
+      .then([=]() {
+        return p;
+      });
+    }
+
+    Promise<T> delay(int ms) const {
+      auto next = *this;
+      return then([next, ms](){
+        auto deferPtr = QSharedPointer<Deferred<T>>(new Deferred<T>());
+        auto t = new QTimer(next.contextObject());
+
+        QObject::connect(t, &QTimer::timeout, [=](){
+          deferPtr->resolve(next);
+        });
+
+        QObject::connect(t, &QTimer::timeout, t, &QObject::deleteLater);
+        t->start(ms);
+        return deferPtr->promise();
+      });
+    }
+
     // TODO: With a promise
 #if 0
     template <typename PromiseType>
@@ -760,6 +787,33 @@ class Promise {
     Promise<T>
     finally(std::function<void(QObject *)> &&func) const {
       return _finally<T, void>(std::move(func));
+    }
+
+    // Execute the given function after the previous promise was resolved OR promised
+    // and return a new promie
+    template <typename Functor>
+    typename std::enable_if<
+                      Private::async_traits<
+                         typename Private::function_traits<Functor>::result_type>::is_promise,
+                      Promise<typename Private::async_traits<
+                         typename Private::function_traits<Functor>::result_type>::arg_type
+                      >
+             >::type
+    finally(Functor &&functor) const {
+      return _breakpoint<typename Private::async_traits<typename Private::function_traits<Functor>::result_type>::arg_type,
+                   typename Private::function_traits<Functor>::result_type
+                  >(std::move(functor));
+    }
+
+    // Executes the functor after the previous promise was rejected.
+    // The functor can return a new Promise to recover the promise chain.
+    // Otherwise the functor can throw the original PromiseError to continue the failed chain.
+    template <typename Functor>
+    Promise<T>
+    failCatch(Functor &&functor) const {
+      return _failCatch<typename Private::async_traits<typename Private::function_traits<Functor>::result_type>::arg_type,
+                   typename Private::function_traits<Functor>::result_type
+                  >(std::move(functor));
     }
 
   private:
@@ -928,6 +982,126 @@ class Promise {
             try {
               nextDeferObject->start();
               Private::run(std::move(functor), Private::Value<QObject *>(contextObjectPtr.data()));
+              nextDeferObject->reject(deferObject->promiseError());
+            }
+            catch (const PromiseError &error) {
+              // An error thrown inside the functor is propagated for both "fail" and "finally"
+              nextDeferObject->reject(error);
+            }
+            break;
+
+          case Private::DeferObjectStatus::Canceled:
+            // Current promise canceled => cancel next one, too
+            nextDeferObject->cancel();
+            break;
+        }
+      });
+
+      return Promise<PromiseType>(m_sharedContext, nextDeferObject);
+    }
+
+
+    template <typename PromiseType, typename RetValType, typename Functor>
+    Promise<PromiseType> _breakpoint(Functor &&functor) const {
+      static_assert(Private::function_traits<Functor>::arity <= 1, "_then(): Callback should take not more than one parameter");
+
+      auto deferObject = m_deferObject;
+      auto nextDeferObject = Private::DeferObject<PromiseType>::create(nullptr);
+
+      Q_ASSERT(deferObject.data());
+
+      auto connectionReceiverWrapperPtr = m_sharedContext->connectionReceiverWrapper();
+      QPointer<QObject> contextObjectPtr(m_sharedContext->contextObject());
+
+      deferObject->addCallback(connectionReceiverWrapperPtr, [=]() {
+        Q_ASSERT(!deferObject.isNull());
+
+        switch (deferObject->status()) {
+          case Private::DeferObjectStatus::Idle:
+          case Private::DeferObjectStatus::Running:
+            Q_UNREACHABLE();
+
+          case Private::DeferObjectStatus::Resolved:
+          case Private::DeferObjectStatus::Rejected:
+            try {
+              nextDeferObject->start();
+              Private::Value<RetValType> value = Private::run(std::move(functor), deferObject->value());
+
+              // "then" reflects the return value of the functor
+              nextDeferObject->resolve(value);
+            }
+            catch (const PromiseError &error) {
+              // An error thrown inside the functor is propagated for both "then" and "finally"
+              nextDeferObject->reject(error);
+            }
+            break;
+
+          case Private::DeferObjectStatus::ContextDestroyed:
+            try {
+              nextDeferObject->start();
+              Private::run(std::move(functor), Private::Value<QObject *>(contextObjectPtr.data()));
+              nextDeferObject->reject(deferObject->promiseError());
+            }
+            catch (const PromiseError &error) {
+              // An error thrown inside the functor is propagated for both "fail" and "finally"
+              nextDeferObject->reject(error);
+            }
+            break;
+
+          case Private::DeferObjectStatus::Canceled:
+            // Current promise canceled => cancel next one, too
+            nextDeferObject->cancel();
+            break;
+        }
+      });
+
+      return Promise<PromiseType>(m_sharedContext, nextDeferObject);
+    }
+
+    template <typename PromiseType, typename RetValType, typename Functor>
+    Promise<PromiseType> _failCatch(Functor &&functor) const {
+      static_assert(Private::function_traits<Functor>::arity <= 1, "_then(): Callback should take not more than one parameter");
+
+      auto deferObject = m_deferObject;
+      auto nextDeferObject = Private::DeferObject<PromiseType>::create(nullptr);
+
+      Q_ASSERT(deferObject.data());
+
+      auto connectionReceiverWrapperPtr = m_sharedContext->connectionReceiverWrapper();
+      QPointer<QObject> contextObjectPtr(m_sharedContext->contextObject());
+
+      deferObject->addCallback(connectionReceiverWrapperPtr, [=]() {
+        Q_ASSERT(!deferObject.isNull());
+
+        switch (deferObject->status()) {
+            case Private::DeferObjectStatus::Idle:
+            case Private::DeferObjectStatus::Running:
+              Q_UNREACHABLE();
+
+            case Private::DeferObjectStatus::Resolved:
+              // "fail" function is not executed when the promise has been resolved
+              // and the promise value is simply forwarded
+              nextDeferObject->resolve(deferObject->value());
+              break;
+
+          case Private::DeferObjectStatus::Rejected:
+            try {
+              nextDeferObject->start();
+              Private::Value<RetValType> value = Private::run(std::move(functor), Private::Value<PromiseError>(deferObject->promiseError()));
+
+              // "then" reflects the return value of the functor
+              nextDeferObject->resolve(value);
+            }
+            catch (const PromiseError &error) {
+              // An error thrown inside the functor is propagated for both "then" and "finally"
+              nextDeferObject->reject(error);
+            }
+            break;
+
+          case Private::DeferObjectStatus::ContextDestroyed:
+            try {
+              nextDeferObject->start();
+              Private::run(std::move(functor), Private::Value<PromiseError>(deferObject->promiseError()));
               nextDeferObject->reject(deferObject->promiseError());
             }
             catch (const PromiseError &error) {
@@ -1183,9 +1357,15 @@ void Private::DeferObject<T>::resolve(const Promise<U> &promise) {
   });
 }
 
+template <typename T>
+QSharedPointer<Deferred<T>> makeDeferredPtr()
+{
+  return QSharedPointer<Deferred<T>>(new Deferred<T>());
+}
+
 template <typename PromiseType, typename PromiseFunc>
 Promise<PromiseType> makePromise(PromiseFunc promiseFunc) {
-  auto deferPtr = QSharedPointer<Deferred<PromiseType>>(new Deferred<PromiseType>());
+  auto deferPtr = makeDeferredPtr<PromiseType>();
   auto resolveFunc = [=](const PromiseType &value) {
     deferPtr->resolve(value);
   };
@@ -1207,7 +1387,7 @@ Promise<typename Private::signal_traits<Member>::result_type>
 makeConnectionPromise(Emitter emitter, Member pointerToMemberFunction) {
   typedef typename Private::signal_traits<Member>::result_type RetType;
 
-  auto deferPtr = QSharedPointer<Deferred<RetType>>(new Deferred<RetType>());
+  auto deferPtr = makeDeferredPtr<RetType>();
 
   auto conn = QObject::connect(emitter, pointerToMemberFunction, [=](const RetType &arg) {
     deferPtr->resolve(arg);
